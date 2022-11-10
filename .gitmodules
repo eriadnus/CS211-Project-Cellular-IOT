@@ -1,0 +1,3 @@
+[submodule "mobileinsight-core"]
+	path = mobileinsight-core
+	url = https://github.com/mobile-insight/mobileinsight-core.git
