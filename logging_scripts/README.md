@@ -64,6 +64,7 @@ sudo python3 catch_all_log.py /dev/ttyUSB0 115200 test.qmdl
 # NOTE: the atinout may need to be copied to the /usr/bin
 sudo python3 collect_atinout.py
 # if the atinout scripts could receive the ping results, then the board is connected
+```
 
 3. Move (as desired) to generate interesting data!
 
@@ -74,5 +75,3 @@ sudo python3 collect_atinout.py
 2. Close terminal running `collect_atinout.py` script to stop ping traffic generation.
 
 3. Disconnect the CIoT module's USB connection.
-
-
