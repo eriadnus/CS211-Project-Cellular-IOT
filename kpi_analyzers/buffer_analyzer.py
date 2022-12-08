@@ -1,57 +1,276 @@
 #!/usr/bin/python
 # Filename: buffer_analyzer.py
 """
+Analyzer for RRCReconfiguration and RRCReconfigurationComplete.
 
-Analyzer for MAC Buffer & RLC messages
-
-Author: Jinghao Zhao
+Author: Jinghao Zhao & Ricky Guo
 """
 
 __all__ = ["BufferAnalyzer"]
 
-try:
-    import xml.etree.cElementTree as ET
-except ImportError:
-    import xml.etree.ElementTree as ET
-
+import re
 from mobile_insight.analyzer.analyzer import *
 from mobile_insight.analyzer import *
-from datetime import datetime
-import time
-import dis
-import re
+from enum import Enum
+
+MINIMUM_HANDOVER_LATENCY = 0
+MAXIMUM_HANDOVER_LATENCY = float('inf')
+class RRCState(Enum):
+    NOTHING = 0
+    RRC_CONNECTION_REQUEST = 1
+    RRC_CONNECTION_SETUP = 2
+    RRC_CONNECTION_SETUP_COMPLETE = 3
+    SECURITY_MODE_COMMAND = 4
+    SECURITY_MODE_COMPLETE = 5
+    MEASUREMENT_REPORT = 6
+    RRC_NON_HANDOVER_RECONFIGURATION = 7
+    RRC_HANDOVER_RECONFIGURATION = 8
+    RRC_RECONFIGURATION_COMPLETE = 9
+
+class NASState(Enum):
+    NOTHING = 0
+    ATTACH_REQUEST = 15
+    AUTHENTICATION_REQUEST = 1
+    AUTHENTICATION_RESPONSE = 2
+    SECURITY_MODE_COMMAND = 3
+    SECURITY_MODE_COMPLETE = 4
+    ESM_INFORMATION_REQUEST = 5
+    ESM_INFORMATION_RESPONSE = 6
+    ATTACH_ACCEPT = 7
+    SERVICE_REQUEST = 8
+    PDN_CONNECTIVITY_REQUEST = 9
+    ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST = 10
+    ACTIVATE_DEFAULT_EPS_BEARER_ACCEPT_REQUEST = 11
+    ATTACH_COMPLETE = 12
+    TRACKING_AREA_UPDATE_REQUEST = 13
+    TRACKING_AREA_UPDATE_ACCEPT = 14
 
 class BufferAnalyzer(Analyzer):
     """
-    An KPI analyzer to monitor and manage uplink latency breakdown
+    A KPI analyzer to derive signals for handover latency.
     """
-    def __init__(self, path, filename):
+
+    """
+    RRC filtering.
+    """
+    @staticmethod
+    def has_rrc_connection_request_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="rrcConnectionRequest"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_rrc_connection_setup_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="rrcConnectionSetup"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_rrc_connection_setup_complete_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="rrcConnectionSetupComplete"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_rrc_connection_security_mode_command_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="securityModeCommand"' in decoded_message
+        return False
+    @staticmethod
+    def has_rrc_connection_security_mode_complete_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="securityModeComplete"' in decoded_message
+        return False
+    @staticmethod
+    def has_rrc_measurement_report_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="measurementReport"' in decoded_message
+        return False
+    @staticmethod
+    def has_handover_rrc_connection_reconfiguration_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'targetPhysCellId' in decoded_message \
+                and 'showname="rrcConnectionReconfiguration"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_non_handover_rrc_connection_reconfiguration_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'targetPhysCellId' not in decoded_message \
+                   and 'showname="rrcConnectionReconfiguration"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_rrc_connection_reconfiguration_complete_record(message):
+        if message.type_id == 'LTE_RRC_OTA_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="rrcConnectionReconfigurationComplete"' in decoded_message
+        return False
+
+    """
+    NAS filtering.
+    """
+    @staticmethod
+    def has_nas_attach_request_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Attach request (0x41)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_authentication_request_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Incoming_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Authentication request (0x52)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_authentication_response_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Authentication response (0x53)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_security_mode_command_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Incoming_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Security mode command (0x5d)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_security_mode_complete_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Security mode complete (0x5e)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_esm_information_request_record(message):
+        if message.type_id == 'LTE_NAS_ESM_OTA_Incoming_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS session management messages: ESM information request (0xd9)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_esm_information_response_record(message):
+        if message.type_id == 'LTE_NAS_ESM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS session management messages: ESM information response (0xda)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_attach_accept_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Incoming_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Attach accept (0x42)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_service_request_record(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="1100 .... = Security header type: Security header for the SERVICE REQUEST message (12)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_pdn_connectivity_request_record(message):
+        if message.type_id == 'LTE_NAS_ESM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS session management messages: PDN connectivity request (0xd0)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_activate_default_eps_bearer_context_request_record(message):
+        if message.type_id == 'LTE_NAS_ESM_OTA_Incoming_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS session management messages: Activate default EPS bearer context request (0xc1)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_activate_default_eps_bearer_context_accept_record(message):
+        if message.type_id == 'LTE_NAS_ESM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS session management messages: Activate default EPS bearer context accept (0xc2)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_attach_complete_record(message):
+        if message.type_id  == 'LTE_NAS_EMM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Attach complete (0x43)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_tracking_area_update_request(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Outgoing_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Tracking area update request (0x48)"' in decoded_message
+        return False
+
+    @staticmethod
+    def has_nas_tracking_area_update_accept(message):
+        if message.type_id == 'LTE_NAS_EMM_OTA_Incoming_Packet':
+            decoded_message = str(message.data.decode())
+            return 'showname="NAS EPS Mobility Management Message Type: Tracking area update accept (0x49)"' in decoded_message
+        return False
+
+    @staticmethod
+    def get_timedelta_millis(time_delta):
+        return time_delta.microseconds / 1000
+
+    def __init__(self):
         Analyzer.__init__(self)
-        self.add_source_callback(self.__msg_callback)
 
+        # Options
+        self.silence_rrc_parsing_logs = True
+        self.silence_nas_parsing_logs = True
 
-        self.fn = -1
-        self.sfn = -1
-        self.last_buffer = 0
-        self.pkt_size = 40
-        self.in_t = -1
-        self.latency_list = []
-        self.last_t = -1
+        self.add_source_callback(self.__rrc_message_callback)
+        self.rrc_split_latency_metrics = {
+            'connection_request_to_connection_setup': [],
+            'connection_setup_to_connection_setup_complete': [],
+            'connection_setup_complete_to_security_mode_command': [],
+            'security_mode_command_to_security_mode_complete': [],
+            'non_handover_security_mode_complete_to_connection_reconfiguration': [],
+            'handover_measurement_report_to_connection_reconfiguration': [],
+            'non_handover_connection_reconfiguration_to_connection_reconfiguration_complete': [],
+            'handover_connection_reconfiguration_to_connection_reconfiguration_complete': [],
+        }
+        self.rrc_message_timestamps = {}
+        self.rrc_previous_state = RRCState.NOTHING
 
-        # record the fn/sfn round
-        self.mac_round = 0
-        self.rlc_round = 0
-        self.last_fn = 0
-        self.rlc_last_fn = 0
-        self.sync_count = 0
-        self.synced = False
-
-        self.mac_msg = open(path + filename + '_mac.txt', 'w')
-        self.rlc_msg = open(path + filename + '_rlc.txt', 'w')
-        self.config_msg = open(path + filename + '_config.txt', 'w')
-        self.sr_msg = open(path + filename + '_sr.txt', 'w')
-        self.all_msg = open(path + filename + '_all.txt', 'w')
-        
+        self.add_source_callback(self.__nas_message_callback)
+        self.nas_split_latency_metrics = {
+            'attach_request_to_authentication_request': [],
+            'authentication_request_to_authentication_response': [],
+            'authentication_response_to_security_mode_command': [],
+            'security_mode_command_to_security_mode_complete': [],
+            'security_mode_complete_to_esm_information_request': [],
+            'esm_information_request_to_esm_information_response': [],
+            'esm_information_response_to_attach_accept': [],
+            'active_activate_default_eps_bearer_context_request_to_activate_default_eps_bearer_context_accept': [],
+            'idle_activate_default_eps_bearer_context_request_to_activate_default_eps_bearer_context_accept': [],
+            'activate_default_eps_bearer_context_request_to_attach_complete': [],
+            'attach_complete_to_pdn_connectivity_request': [],
+            'active_pdn_connectivity_request_to_activate_default_eps_bearer_context_request': [],
+            'idle_pdn_connectivity_request_to_activate_default_eps_bearer_context_request': [],
+            'service_request_to_pdn_connectivity_request': [],
+            'service_request_to_tracking_area_update_request': [],
+            'tracking_area_update_request_to_tracking_area_update_accept': [],
+        }
+        self.nas_message_timestamps = {}
+        self.nas_previous_state = NASState.NOTHING
+        self.nas_previous_previous_state = NASState.NOTHING
+        self.nas_previous_previous_previous_state = NASState.NOTHING
 
     def set_source(self, source):
         """
@@ -61,170 +280,314 @@ class BufferAnalyzer(Analyzer):
         """
         Analyzer.set_source(self, source)
 
-        source.enable_log_all()
+        # Enable RRC Logging
+        source.enable_log('LTE_RRC_OTA_Packet')
 
-    def __f_time_diff(self, t1, t2):
-        if t1 > t2:
-            t_diff = t2 + 10240 - t1
-        else:
-            t_diff = t2 - t1
-        return t_diff
+        # Enable NAS Logging
+        source.enable_log('LTE_NAS_ESM_OTA_Outgoing_Packet')
+        source.enable_log('LTE_NAS_EMM_OTA_Outgoing_Packet')
+        source.enable_log('LTE_NAS_ESM_OTA_Incoming_Packet')
+        source.enable_log('LTE_NAS_EMM_OTA_Incoming_Packet')
 
+    def rrc_logging_silencer(self, rrc_logging_message):
+        if not self.silence_rrc_parsing_logs:
+            print(rrc_logging_message)
+    def __rrc_message_callback(self, message):
+        decoded_message = message.data.decode()
+        if BufferAnalyzer.has_rrc_connection_request_record(message):
+            self.rrc_logging_silencer('[1] Parsing connection request record.')
+            self.rrc_message_timestamps['connection_request'] = decoded_message['timestamp']
+            self.rrc_previous_state = RRCState.RRC_CONNECTION_REQUEST
+        if BufferAnalyzer.has_rrc_connection_setup_record(message):
+            self.rrc_logging_silencer('[2] Parsing connection setup record.')
+            self.rrc_message_timestamps['connection_setup'] = decoded_message['timestamp']
+            if self.rrc_previous_state != RRCState.RRC_CONNECTION_REQUEST:
+                print('Encountered invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.RRC_CONNECTION_SETUP
+                ))
+            else:
+                self.rrc_split_latency_metrics['connection_request_to_connection_setup'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['connection_setup'] - self.rrc_message_timestamps['connection_request'])
+                )
+            self.rrc_previous_state = RRCState.RRC_CONNECTION_SETUP
+        if BufferAnalyzer.has_rrc_connection_setup_complete_record(message):
+            self.rrc_logging_silencer('[3] Parsing connection setup complete record.')
+            self.rrc_message_timestamps['connection_setup_complete'] = decoded_message['timestamp']
+            if self.rrc_previous_state != RRCState.RRC_CONNECTION_SETUP:
+                print('Encountered invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.RRC_CONNECTION_SETUP_COMPLETE
+                ))
+            else:
+                self.rrc_split_latency_metrics['connection_setup_to_connection_setup_complete'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['connection_setup_complete'] - self.rrc_message_timestamps['connection_setup'])
+                )
+            self.rrc_previous_state = RRCState.RRC_CONNECTION_SETUP_COMPLETE
+        if BufferAnalyzer.has_rrc_connection_security_mode_command_record(message):
+            self.rrc_logging_silencer('[4] Parsing connection security mode command record.')
+            self.rrc_message_timestamps['security_mode_command'] = decoded_message['timestamp']
+            if self.rrc_previous_state != RRCState.RRC_CONNECTION_SETUP_COMPLETE:
+                print('Encountered invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.SECURITY_MODE_COMMAND
+                ))
+            else:
+                self.rrc_split_latency_metrics['connection_setup_complete_to_security_mode_command'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['security_mode_command'] - self.rrc_message_timestamps['connection_setup_complete'])
+                )
+            self.rrc_previous_state = RRCState.SECURITY_MODE_COMMAND
+        if BufferAnalyzer.has_rrc_connection_security_mode_complete_record(message):
+            self.rrc_logging_silencer('[5.a] Parsing connection security mode complete record.')
+            self.rrc_message_timestamps['security_mode_complete'] = decoded_message['timestamp']
+            if self.rrc_previous_state != RRCState.SECURITY_MODE_COMMAND:
+                print('Invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.SECURITY_MODE_COMPLETE
+                ))
+            else:
+                self.rrc_split_latency_metrics['security_mode_command_to_security_mode_complete'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['security_mode_complete'] - self.rrc_message_timestamps['security_mode_command'])
+                )
+            self.rrc_previous_state = RRCState.SECURITY_MODE_COMPLETE
+        if BufferAnalyzer.has_rrc_measurement_report_record(message):
+            self.rrc_logging_silencer('[5.b] Parsing measurement report record.')
+            self.rrc_message_timestamps['measurement_report'] = decoded_message['timestamp']
+            self.rrc_previous_state = RRCState.MEASUREMENT_REPORT
+        if BufferAnalyzer.has_non_handover_rrc_connection_reconfiguration_record(message):
+            self.rrc_logging_silencer('[6.a] Parsing non-handover connection reconfiguration record.')
+            self.rrc_message_timestamps['non_handover_reconfiguration'] = decoded_message['timestamp']
+            if self.rrc_previous_state != RRCState.SECURITY_MODE_COMPLETE:
+                print('Invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.RRC_NON_HANDOVER_RECONFIGURATION
+                ))
+            else:
+                self.rrc_split_latency_metrics['non_handover_security_mode_complete_to_connection_reconfiguration'].append(
+                    BufferAnalyzer.get_timedelta_millis(
+                        self.rrc_message_timestamps['non_handover_reconfiguration'] - self.rrc_message_timestamps['security_mode_complete'])
+                )
+            self.rrc_previous_state = RRCState.RRC_NON_HANDOVER_RECONFIGURATION
+        if BufferAnalyzer.has_handover_rrc_connection_reconfiguration_record(message):
+            self.rrc_logging_silencer('[6.b] Parsing handover connection reconfiguration record.')
+            self.rrc_message_timestamps['handover_reconfiguration'] = decoded_message['timestamp']
+            if self.rrc_previous_state != RRCState.MEASUREMENT_REPORT:
+                print('Invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.RRC_HANDOVER_RECONFIGURATION
+                ))
+            else:
+                self.rrc_split_latency_metrics['handover_measurement_report_to_connection_reconfiguration'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['handover_reconfiguration'] - self.rrc_message_timestamps['measurement_report'])
+                )
+            self.rrc_previous_state = RRCState.RRC_HANDOVER_RECONFIGURATION
+        if BufferAnalyzer.has_rrc_connection_reconfiguration_complete_record(message):
+            self.rrc_logging_silencer('[7] Parsing connection reconfiguration complete record.')
+            self.rrc_message_timestamps['reconfiguration_complete'] = decoded_message['timestamp']
+            if self.rrc_previous_state == RRCState.RRC_NON_HANDOVER_RECONFIGURATION:
+                self.rrc_split_latency_metrics['non_handover_connection_reconfiguration_to_connection_reconfiguration_complete'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['non_handover_reconfiguration']
+                    - self.rrc_message_timestamps['reconfiguration_complete'])
+                )
+            elif self.rrc_previous_state == RRCState.RRC_HANDOVER_RECONFIGURATION:
+                self.rrc_split_latency_metrics['handover_connection_reconfiguration_to_connection_reconfiguration_complete'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.rrc_message_timestamps['handover_reconfiguration']
+                    - self.rrc_message_timestamps['reconfiguration_complete'])
+                )
+            else:
+                print('Invalid state transition from {} to {}'.format(
+                    self.rrc_previous_state, RRCState.RRC_CONNECTION_SETUP_COMPLETE
+                ))
+            self.rrc_previous_state = RRCState.RRC_CONNECTION_SETUP_COMPLETE
 
-    def __msg_callback(self, msg):
-        # print("ID:",msg.type_id)
-        if msg.type_id == "LTE_RRC_CDRX_Events_Info":
-            decoded_msg = msg.data.decode()
-            timestamp = int(datetime.timestamp(decoded_msg['timestamp']))
-            # print(decoded_msg)
-            for record in decoded_msg['Records']:
-                if record['CDRX Event'] == 'CDRX_OFF_2_ON' :
-                    self.config_msg.write("CDRX_OFF_2_ON: %s %s %s\n" % (timestamp,str(record['SFN']),str(record['Sub-FN'])))
-                if record['CDRX Event'] == 'CDRX_ON_2_OFF' :
-                    self.config_msg.write("CDRX_ON_2_OFF: %s %s %s\n" % (timestamp,str(record['SFN']),str(record['Sub-FN'])))
-
-        elif msg.type_id == "LTE_PHY_PUCCH_Tx_Report":
-            decoded_msg = msg.data.decode()
-            timestamp = int(datetime.timestamp(decoded_msg['timestamp']))
-            for record in decoded_msg['Records']:
-                if record['Format'] == 'Format 1':
-                    # print("SR:",timestamp,str(record['Current SFN SF'])[:-1],str(record['Current SFN SF'])[-1])
-                    self.sr_msg.write("SR: %s %s %s\n" % (timestamp,str(record['Current SFN SF'])[:-1],str(record['Current SFN SF'])[-1]))
-                    self.all_msg.write("%s %s %s SR\n" % (timestamp,str(record['Current SFN SF'])[:-1],str(record['Current SFN SF'])[-1]))
-
-        elif msg.type_id == "LTE_MAC_UL_Transport_Block":
-            decoded_msg = msg.data.decode()
-            timestamp = int(datetime.timestamp(decoded_msg['timestamp']))
-            # print(decoded_msg)
-            for packet in decoded_msg['Subpackets']:
-                for sample in packet['Samples']:
-                    padding = sample['Padding (bytes)']
-                    grant = sample["Grant (bytes)"]
-                    # print("Grant Time:", timestamp, sample['SFN'], sample['Sub-FN'])
-                    self.config_msg.write("Grant Time: %s %s %s\n" % (timestamp, str(sample['SFN']), str(sample['Sub-FN'])))
-                    self.all_msg.write("%s %s %s Grant %s %s\n" % (timestamp, str(sample['SFN']), str(sample['Sub-FN']), str(grant), str(padding)))
-                    res_util = (grant - padding) / grant
-                    self.config_msg.write("Grant: %s Padding: %s Util: %s\n" % (str(grant), str(padding), str(res_util)))
-
-        elif msg.type_id == "LTE_RRC_OTA_Packet":
-            decoded_msg = msg.data.decode()
-            config_xml = str(decoded_msg['Msg'])
-            sr_index = re.search(r'sr-ConfigIndex: (\d+)',config_xml)
-            if sr_index:
-                # print(sr_index.group())
-                # self.sr_time = (10 + int(sr_index.group(1)) - 5) % 10
-                self.config_msg.write(str(sr_index.group())+"\n")
-            onDurationTimer = re.search(r'onDurationTimer: psf(\d+)', config_xml)
-            if onDurationTimer:
-                self.config_msg.write(str(onDurationTimer.group()) + "\n")
-            drx_InactivityTimer = re.search(r'drx-InactivityTimer: psf(\d+)', config_xml)
-            if drx_InactivityTimer:
-                self.config_msg.write(str(drx_InactivityTimer.group()) + "\n")
-            drx_RetransmissionTimer = re.search(r'drx-RetransmissionTimer: psf(\d+)', config_xml)
-            if drx_RetransmissionTimer:
-                self.config_msg.write(str(drx_RetransmissionTimer.group()) + "\n")
-            longDRX_CycleStartOffset = re.search(r'longDRX-CycleStartOffset: sf(\d+)', config_xml)
-            if longDRX_CycleStartOffset:
-                self.config_msg.write(str(longDRX_CycleStartOffset.group()) + "\n")
-            shortDRX_Cycle = re.search(r'shortDRX-Cycle: sf(\d+)', config_xml)
-            if shortDRX_Cycle:
-                self.config_msg.write(str(shortDRX_Cycle.group()) + "\n")
-            drxShortCycleTimer = re.search(r'drxShortCycleTimer: (\d+)', config_xml)
-            if drxShortCycleTimer:
-                self.config_msg.write(str(drxShortCycleTimer.group()) + "\n")
-
-        elif msg.type_id == "LTE_RLC_UL_AM_All_PDU":
-            # print("`LTE_RLC_UL_AM_All_PDU:", msg.data.decode())
-            decoded_msg = msg.data.decode()
-            for packet in decoded_msg['Subpackets']:
-                # print("RLC Time:", msg.data.decode()['timestamp'])
-                timestamp = int(datetime.timestamp(decoded_msg['timestamp']))
-                for sample in packet['RLCUL PDUs']:
-                    SFN = sample['sub_fn']
-                    FN = sample['sys_fn']
-                    data_type = sample['PDU TYPE']
-                    # self.update_time(SFN, FN)
-                    # if 'RLC DATA LI' in sample:
-                    #     pdu_len = sample['pdu_bytes']
-                    #     hdr_len = len(sample['RLC DATA LI'])+3
-                    #     send_len = pdu_len - hdr_len
-                    # else:
-                    #     send_len = sample['pdu_bytes']
-                    if data_type == "RLCUL DATA":
-                        pdu_len = sample['pdu_bytes']
-                        hdr_len = sample['logged_bytes']
-                        send_len = pdu_len - hdr_len
-                    else:
-                        send_len = sample['pdu_bytes']
-
-                    # calculate the round, add 20 to handle the disorder
-                    if self.rlc_last_fn > FN + 20:
-                        if self.synced == True:
-                            self.synced = False
-                        else:
-                            self.rlc_round += 1
-                    self.rlc_last_fn = FN
-
-                    # self.rlc_msg += "RLC Time:" + str(decoded_msg['timestamp'])
-                    # self.rlc_msg +=  "RLC: %s %s %s %s %s\n" % (timestamp, FN, SFN, data_type, send_len)
-                    self.rlc_msg.write("RLC: %s %s %s %s %s\n" % (timestamp, FN, SFN, data_type, send_len))
-
-
-        elif msg.type_id == "LTE_MAC_UL_Buffer_Status_Internal":
-            decoded_msg = msg.data.decode()
-            for packet in decoded_msg['Subpackets']:
-                timestamp = int(datetime.timestamp(decoded_msg['timestamp']))
-                # print(timestamp)
-                for sample in packet['Samples']:
-                    # print sample
-                    SFN = sample['Sub FN']
-                    FN = sample['Sys FN']
-                    self.update_time(SFN, FN)
-                    # print("Mac Time:", timestamp, self.fn, self.sfn )
-
-                    # calculate the round
-                    if self.fn < self.last_fn - 100 and self.fn != -1:
-                        self.mac_round += 1
-                    self.last_fn = self.fn
-
-                    if (sample['LCIDs'] == []):
-                        # print "error here!!"
-                        continue
-                    data = sample['LCIDs'][-1]
-                    total_b = data['Total Bytes']
-                    new_c = data['New Compressed Bytes']
-                    # print("Mac Time:", timestamp, self.fn, self.sfn,total_b)
-
-                    # self.mac_msg += "MAC Time:" + str(decoded_msg['timestamp'])
-                    # self.mac_msg += "MAC: %s %s %s %s %s\n" % (timestamp, self.fn, self.sfn, total_b, new_c)
-                    # self.mac_msg.write("MAC: %s %s %s %s %s %s\n" % (decoded_msg['timestamp'], timestamp, self.fn, self.sfn, total_b, new_c))
-                    self.mac_msg.write("MAC: %s %s %s %s %s\n" % ( timestamp, self.fn, self.sfn, total_b, new_c))
-
-                    if total_b > 0:
-                        self.all_msg.write("%s %s %s Data %s %s\n" % (timestamp, self.fn, self.sfn, total_b, new_c))
-                        # print("MAC:",  self.round, self.fn, self.sfn, total_b, new_c)
-                        if total_b - self.last_buffer == self.pkt_size:
-                            self.in_t = self.sfn + self.fn * 10
-
-                    if total_b == 0 and self.in_t > 0:
-                        # print("MAC:", self.fn, self.sfn, total_b, new_c)
-                        t_diff = self.__f_time_diff(self.in_t, self.last_t) + 1
-                        # print("From ", self.in_t, " to ", self.last_t + 1 ,"latency: ", t_diff)
-                        self.latency_list.append(t_diff)
-                        self.in_t = -1
-
-                    self.last_buffer = total_b
-                    self.last_t = self.sfn + self.fn * 10
-
-    def update_time(self, SFN, FN):
-        # print(SFN, FN)
-        if self.sfn >= 0:      
-            self.sfn += 1
-            if self.sfn == 10:
-                self.sfn = 0
-                self.fn += 1
-            if self.fn == 1024:
-                self.fn = 0
-        if SFN < 10:
-            self.sfn = SFN
-            self.fn = FN
+    def nas_logging_silencer(self, nas_logging_message):
+        if not self.silence_nas_parsing_logs:
+            print(nas_logging_message)
+    def __nas_message_callback(self, message):
+        decoded_message = message.data.decode()
+        if BufferAnalyzer.has_nas_attach_request_record(message):
+            self.nas_logging_silencer('[1a] Parsing attach request record.')
+            self.nas_message_timestamps['attach_request'] = decoded_message['timestamp']
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.ATTACH_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_authentication_request_record(message):
+            self.nas_logging_silencer('[2a] Parsing authentication request record.')
+            self.nas_message_timestamps['authentication_request'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.ATTACH_REQUEST:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.AUTHENTICATION_REQUEST
+                ))
+            else:
+                self.nas_split_latency_metrics['attach_request_to_authentication_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['authentication_request']
+                    - self.nas_message_timestamps['attach_request'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.AUTHENTICATION_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_authentication_response_record(message):
+            self.nas_logging_silencer('[3a] Parsing authentication response record.')
+            self.nas_message_timestamps['authentication_response'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.AUTHENTICATION_REQUEST:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.AUTHENTICATION_RESPONSE
+                ))
+            else:
+                self.nas_split_latency_metrics['authentication_request_to_authentication_response'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['authentication_response']
+                    - self.nas_message_timestamps['authentication_request'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.AUTHENTICATION_RESPONSE, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_security_mode_command_record(message):
+            self.nas_logging_silencer('[4a] Parsing security mode command record.')
+            self.nas_message_timestamps['security_mode_command'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.AUTHENTICATION_RESPONSE:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.SECURITY_MODE_COMMAND
+                ))
+            else:
+                self.nas_split_latency_metrics['authentication_response_to_security_mode_command'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['authentication_response']
+                    - self.nas_message_timestamps['security_mode_command'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.SECURITY_MODE_COMMAND, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_security_mode_complete_record(message):
+            self.nas_logging_silencer('[5a] Parsing security mode complete record.')
+            self.nas_message_timestamps['security_mode_complete'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.SECURITY_MODE_COMMAND:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.SECURITY_MODE_COMPLETE
+                ))
+            else:
+                self.nas_split_latency_metrics['security_mode_command_to_security_mode_complete'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['security_mode_command']
+                    - self.nas_message_timestamps['security_mode_complete'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.SECURITY_MODE_COMPLETE, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_esm_information_request_record(message):
+            self.nas_logging_silencer('[6a] Parsing esm information request record.')
+            self.nas_message_timestamps['esm_information_request'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.SECURITY_MODE_COMPLETE:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.ESM_INFORMATION_REQUEST
+                ))
+            else:
+                self.nas_split_latency_metrics['security_mode_complete_to_esm_information_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['security_mode_complete']
+                    - self.nas_message_timestamps['esm_information_request'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.ESM_INFORMATION_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_esm_information_response_record(message):
+            self.nas_logging_silencer('[7a] Parsing esm information response record.')
+            self.nas_message_timestamps['esm_information_response'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.ESM_INFORMATION_REQUEST:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.ESM_INFORMATION_RESPONSE
+                ))
+            else:
+                self.nas_split_latency_metrics['esm_information_request_to_esm_information_response'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['esm_information_request']
+                    - self.nas_message_timestamps['esm_information_response'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.ESM_INFORMATION_RESPONSE.ESM_INFORMATION_RESPONSE, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_attach_accept_record(message):
+            self.nas_logging_silencer('[8.1a] Parsing attach accept record.')
+            self.nas_message_timestamps['attach_accept'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.ESM_INFORMATION_RESPONSE:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.ATTACH_ACCEPT
+                ))
+            else:
+                self.nas_split_latency_metrics['esm_information_response_to_attach_accept'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['attach_accept']
+                    - self.nas_message_timestamps['esm_information_response'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.AUTHENTICATION_RESPONSE, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_activate_default_eps_bearer_context_request_record(message):
+            self.nas_logging_silencer('[8.2a/11a/3b] Parsing nas activate default eps bearer context request record.')
+            self.nas_message_timestamps['activate_default_eps_bearer_context_request'] = decoded_message['timestamp']
+            if self.nas_previous_state == NASState.PDN_CONNECTIVITY_REQUEST and self.nas_previous_previous_state != NASState.SERVICE_REQUEST:
+                self.nas_split_latency_metrics['active_pdn_connectivity_request_to_activate_default_eps_bearer_context_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['pdn_connectivity_request']
+                    - self.nas_message_timestamps['activate_default_eps_bearer_context_request'])
+                )
+            elif self.nas_previous_state == NASState.PDN_CONNECTIVITY_REQUEST and self.nas_previous_previous_state == NASState.SERVICE_REQUEST:
+                self.nas_split_latency_metrics['idle_pdn_connectivity_request_to_activate_default_eps_bearer_context_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['pdn_connectivity_request']
+                    - self.nas_message_timestamps['activate_default_eps_bearer_context_request'])
+                )
+            else:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST
+                ))
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_attach_complete_record(message):
+            self.nas_logging_silencer('[9a] Parsing attach complete record.')
+            self.nas_message_timestamps['attach_complete'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.ATTACH_COMPLETE
+                ))
+            else:
+                self.nas_split_latency_metrics['activate_default_eps_bearer_context_request_to_attach_complete'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['attach_complete']
+                    - self.nas_message_timestamps['activate_default_eps_bearer_context_request'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.ATTACH_COMPLETE, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_service_request_record(message):
+            self.nas_logging_silencer('[1b/1c] Parsing nas service request record.')
+            self.nas_message_timestamps['service_request'] = decoded_message['timestamp']
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.SERVICE_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_pdn_connectivity_request_record(message):
+            self.nas_logging_silencer('[10a/2b] Parsing nas pdn connectivity request record.')
+            self.nas_message_timestamps['pdn_connectivity_request'] = decoded_message['timestamp']
+            if self.nas_previous_state == NASState.ATTACH_COMPLETE:
+                self.nas_split_latency_metrics['attach_complete_to_pdn_connectivity_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['pdn_connectivity_request']
+                    - self.nas_message_timestamps['attach_complete'])
+                )
+            elif self.nas_previous_state == NASState.SERVICE_REQUEST:
+                self.nas_split_latency_metrics['service_request_to_pdn_connectivity_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['pdn_connectivity_request']
+                    - self.nas_message_timestamps['service_request'])
+                )
+            else:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.PDN_CONNECTIVITY_REQUEST
+                ))
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.PDN_CONNECTIVITY_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_tracking_area_update_request(message):
+            self.nas_logging_silencer('[2c] Parsing nas tracking area update request.')
+            self.nas_message_timestamps['tracking_area_update_request'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.SERVICE_REQUEST:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.TRACKING_AREA_UPDATE_REQUEST
+                ))
+            else:
+                self.nas_split_latency_metrics['service_request_to_tracking_area_update_request'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['tracking_area_update_request']
+                    - self.nas_message_timestamps['service_request'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.TRACKING_AREA_UPDATE_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_tracking_area_update_accept(message):
+            self.nas_logging_silencer('[3c] Parsing nas tracking area update accept.')
+            self.nas_message_timestamps['tracking_area_update_accept'] = decoded_message['timestamp']
+            if self.nas_previous_state != NASState.TRACKING_AREA_UPDATE_REQUEST:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.TRACKING_AREA_UPDATE_ACCEPT
+                ))
+            else:
+                self.nas_split_latency_metrics['tracking_area_update_request_to_tracking_area_update_accept'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['tracking_area_update_accept']
+                    - self.nas_message_timestamps['tracking_area_update_request'])
+                )
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.TRACKING_AREA_UPDATE_ACCEPT, self.nas_previous_state, self.nas_previous_previous_state
+        if BufferAnalyzer.has_nas_activate_default_eps_bearer_context_accept_record(message):
+            self.nas_logging_silencer('[12a/4b] Parsing nas activate default eps bearer context accept record.')
+            self.nas_message_timestamps['activate_default_eps_bearer_context_accept'] = decoded_message['timestamp']
+            if self.nas_previous_state == NASState.ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST and self.nas_previous_previous_state == NASState.PDN_CONNECTIVITY_REQUEST and self.nas_previous_previous_previous_state == NASState.ATTACH_COMPLETE:
+                self.nas_split_latency_metrics['active_activate_default_eps_bearer_context_request_to_activate_default_eps_bearer_context_accept'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['activate_default_eps_bearer_context_request']
+                    - self.nas_message_timestamps['activate_default_eps_bearer_context_accept'])
+                )
+            elif self.nas_previous_state == NASState.ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST and self.nas_previous_previous_state == NASState.PDN_CONNECTIVITY_REQUEST and self.nas_previous_previous_previous_state == NASState.SERVICE_REQUEST:
+                self.nas_split_latency_metrics['idle_activate_default_eps_bearer_context_request_to_activate_default_eps_bearer_context_accept'].append(
+                    BufferAnalyzer.get_timedelta_millis(self.nas_message_timestamps['activate_default_eps_bearer_context_request']
+                    - self.nas_message_timestamps['activate_default_eps_bearer_context_accept'])
+                )
+            else:
+                print('Invalid state transition from {} to {}'.format(
+                    self.nas_previous_state, NASState.ACTIVATE_DEFAULT_EPS_BEARER_ACCEPT_REQUEST
+                ))
+            self.nas_previous_state, self.nas_previous_previous_state, self.nas_previous_previous_previous_state = NASState.ACTIVATE_DEFAULT_EPS_BEARER_ACCEPT_REQUEST, self.nas_previous_state, self.nas_previous_previous_state
